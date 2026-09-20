@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   sync:
@@ -16,45 +17,55 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}
-
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Configurar git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Adicionar remote upstream
+      - name: Adicionar remote upstream e buscar tags
         run: |
           git remote add upstream https://github.com/coder/code-server.git || true
-          git fetch upstream
+          git fetch upstream --tags
+          git fetch upstream main
 
-      - name: Mesclar upstream/main na branch atual
+      - name: Mesclar upstream mantendo apenas workflows locais
         run: |
           BRANCH=$(git rev-parse --abbrev-ref HEAD)
           echo "Branch atual: $BRANCH"
-          git merge upstream/main --no-edit || {
-            echo "Conflito no merge automático. Abortando para revisão manual.";
-            git merge --abort;
-            exit 1;
-          }
+          git merge upstream/main --no-commit --no-ff || true
+          # Garante que os seus workflows personalizados do Alpine não sejam apagados pelo upstream
+          git checkout HEAD -- .github/workflows/ || true
+          git commit -m "chore: sync with upstream code-server" || echo "Sem alterações para commit no código"
+          git push origin HEAD
 
-      - name: Push para o fork
-        run: git push origin HEAD
-
-      - name: Criar tag de release automaticamente
+      - name: Detectar última versão, criar tag e disparar build
         env:
-          SUFFIX: "-alpine1"   # troque para -alpine2, -alpine3... se só mudar o empacotamento
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          SUFFIX: "-alpine1"
         run: |
-          VERSION=$(jq -r .version package.json)
-          TAG="v${VERSION}${SUFFIX}"
-          echo "Versão detectada no code-server: $VERSION"
-          echo "Tag alvo: $TAG"
+          # 1. Encontra a tag de versão numérica mais recente do upstream (ex: v4.96.4 ou v4.135.0)
+          LATEST_UPSTREAM_TAG=$(git tag -l --sort=-v:refname "v*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          
+          if [ -z "$LATEST_UPSTREAM_TAG" ]; then
+            LATEST_UPSTREAM_TAG=$(git describe --tags --abbrev=0 upstream/main 2>/dev/null || echo "v4.135.0")
+          fi
 
+          VERSION="${LATEST_UPSTREAM_TAG#v}"
+          TAG="v${VERSION}${SUFFIX}"
+
+          echo "Última versão oficial detectada: $VERSION"
+          echo "Tag do Alpine a criar: $TAG"
+
+          # 2. Verifica se esta tag já foi lançada no seu fork
           if git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
-            echo "Tag $TAG já existe no fork — nada a fazer, build não será disparado de novo."
+            echo "A tag $TAG já existe no seu fork. Build não precisa ser executado novamente."
           else
-            echo "Tag $TAG não existe ainda. Criando e enviando..."
+            echo "Nova versão detectada! Criando e enviando tag $TAG..."
             git tag "$TAG"
             git push origin "$TAG"
+
+            echo "Disparando o workflow de compilação..."
+            gh workflow run "Build code-server para Alpine (musl) e publicar .apk" -f version="$VERSION"
           fi
