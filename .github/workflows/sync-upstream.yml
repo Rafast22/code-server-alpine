@@ -27,8 +27,10 @@ jobs:
       - name: Adicionar remote upstream e buscar tags
         run: |
           git remote add upstream https://github.com/coder/code-server.git || true
-          git fetch upstream --tags
+          # A flag --force resolve o conflito de tags locais x upstream
+          git fetch upstream --tags --force
           git fetch upstream main
+
 
       - name: Mesclar upstream mantendo apenas workflows locais
         run: |
